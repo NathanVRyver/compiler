@@ -1,7 +1,7 @@
-#include "tokenizer.h"
-#include "parser.h"
-#include "semantic.h"
-#include "codegen.h"
+#include "../include/tokenizer/tokenizer.h"
+#include "../include/parser/parser.h"
+#include "../include/semantic/semantic.h"
+#include "../include/codegen/codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

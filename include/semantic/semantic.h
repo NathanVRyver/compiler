@@ -1,7 +1,7 @@
 #ifndef SEMANTIC_H
 #define SEMANTIC_H
 
-#include "parser.h"
+#include "../parser/parser.h"
 
 /**
  * Symbol type enumeration

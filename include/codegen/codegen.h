@@ -1,7 +1,7 @@
 #ifndef CODEGEN_H
 #define CODEGEN_H
 
-#include "parser.h"
+#include "../parser/parser.h"
 
 /**
  * Code generator structure

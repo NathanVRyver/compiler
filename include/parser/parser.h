@@ -1,7 +1,7 @@
 #ifndef PARSER_H
 #define PARSER_H
 
-#include "tokenizer.h"
+#include "../tokenizer/tokenizer.h"
 #include <stdlib.h>
 
 /**

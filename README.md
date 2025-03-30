@@ -9,12 +9,23 @@ This is a simple compiler for a subset of the C language. It demonstrates the ba
 
 ## Project Structure
 
-- `tokenizer.h/c` - Lexical analyzer that converts C code into tokens
-- `parser.h/c` - Parser that builds an AST from tokens
-- `semantic.h/c` - Semantic analyzer for type checking and scope analysis
-- `codegen.h/c` - Code generator that outputs LLVM IR
-- `main.c` - Main compiler driver program
-- `Makefile` - Build system configuration
+```
+.
+├── include/                 # Header files
+│   ├── tokenizer/           # Tokenizer module headers
+│   ├── parser/              # Parser module headers
+│   ├── semantic/            # Semantic analyzer module headers
+│   └── codegen/             # Code generator module headers
+├── src/                     # Source files
+│   ├── tokenizer/           # Tokenizer implementation
+│   ├── parser/              # Parser implementation
+│   ├── semantic/            # Semantic analyzer implementation
+│   ├── codegen/             # Code generator implementation
+│   └── main.c               # Main compiler driver program
+└── examples/                # Example C files for testing
+    ├── test.c               # Simple test program
+    └── factorial.c          # Factorial calculation example
+```
 
 ## Building the Compiler
 
@@ -30,7 +41,7 @@ make clean
 
 ```bash
 # Compile a C source file
-./ccompiler input.c [output.ll]
+./ccompiler examples/test.c [output.ll]
 ```
 
 If no output file is specified, the default `output.ll` will be used.
