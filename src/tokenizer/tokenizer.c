@@ -11,13 +11,46 @@ Token get_next_token(FILE *file) {
     char c;
     int i = 0;
 
-    // Skip whitespace
-    while ((c = fgetc(file)) != EOF && isspace(c));
-
-    if (c == EOF) {
-        token.type = TOKEN_EOF;
-        token.value[0] = '\0';
-        return token;
+    // Skip whitespace and comments
+    while (1) {
+        c = fgetc(file);
+        if (c == EOF) {
+            token.type = TOKEN_EOF;
+            token.value[0] = '\0';
+            return token;
+        }
+        
+        if (isspace(c)) {
+            continue;
+        }
+        
+        // Skip comments
+        if (c == '/') {
+            char next = fgetc(file);
+            if (next == '/') {
+                // Single-line comment
+                while ((c = fgetc(file)) != EOF && c != '\n');
+                continue;
+            } else if (next == '*') {
+                // Multi-line comment
+                int done = 0;
+                while (!done && (c = fgetc(file)) != EOF) {
+                    if (c == '*') {
+                        if ((c = fgetc(file)) == '/') {
+                            done = 1;
+                        } else {
+                            ungetc(c, file);
+                        }
+                    }
+                }
+                continue;
+            } else {
+                ungetc(next, file);
+                break;
+            }
+        } else {
+            break;
+        }
     }
 
     if (isalpha(c) || c == '_') {
@@ -42,9 +75,23 @@ Token get_next_token(FILE *file) {
         // String
         token.value[i++] = c;
         while ((c = fgetc(file)) != EOF && c != '"') {
+            // Handle escaped quotes
+            if (c == '\\') {
+                char next = fgetc(file);
+                if (next == '"' || next == '\\' || next == 'n' || next == 't') {
+                    token.value[i++] = c;
+                    token.value[i++] = next;
+                } else {
+                    ungetc(next, file);
+                    token.value[i++] = c;
+                }
+            } else {
+                token.value[i++] = c;
+            }
+        }
+        if (c == '"') {
             token.value[i++] = c;
         }
-        token.value[i++] = '"';
         token.value[i] = '\0';
         token.type = TOKEN_STRING;
     } else if (strchr("{}[]();,", c)) {
@@ -53,18 +100,50 @@ Token get_next_token(FILE *file) {
         token.value[i] = '\0';
         token.type = TOKEN_PUNCTUATOR;
     } else {
-        // Operator
+        // Operator - handle each case explicitly
         token.value[i++] = c;
-        // Handle multi-character operators like ==, !=, <=, >=, etc.
-        if (c == '=' || c == '!' || c == '<' || c == '>' || c == '+' || c == '-' || c == '*' || c == '/' || c == '&' || c == '|') {
-            char next_c = fgetc(file);
-            if (next_c == '=' || 
-                ((c == '+' || c == '-' || c == '&' || c == '|') && next_c == c)) {
-                token.value[i++] = next_c;
+        
+        // Check for potentially multi-character operators
+        if (c == '=') {
+            // Could be '=' or '=='
+            char next = fgetc(file);
+            printf("DEBUG: '=' followed by '%c' (ASCII %d)\n", next, next);
+            if (next == '=') {
+                // This is '==' (equality)
+                token.value[i++] = next;
+                printf("DEBUG: Recognized as '=='\n");
             } else {
-                ungetc(next_c, file);
+                // This is just '=' (assignment)
+                ungetc(next, file);
+                printf("DEBUG: Recognized as '='\n");
+            }
+        } else if (c == '!' || c == '<' || c == '>') {
+            // Could be '!', '!=', '<', '<=', '>', or '>='
+            char next = fgetc(file);
+            if (next == '=') {
+                token.value[i++] = next;
+            } else {
+                ungetc(next, file);
+            }
+        } else if (c == '+' || c == '-') {
+            // Could be '+', '++', '-', or '--'
+            char next = fgetc(file);
+            if (next == c) {
+                token.value[i++] = next;
+            } else {
+                ungetc(next, file);
+            }
+        } else if (c == '&' || c == '|') {
+            // Could be '&', '&&', '|', or '||'
+            char next = fgetc(file);
+            if (next == c) {
+                token.value[i++] = next;
+            } else {
+                ungetc(next, file);
             }
         }
+        // All other operators (like '*', '/', etc.) are single character
+        
         token.value[i] = '\0';
         token.type = TOKEN_OPERATOR;
     }
@@ -73,7 +152,12 @@ Token get_next_token(FILE *file) {
 }
 
 int is_keyword(const char *str) {
-    const char *keywords[] = {"int", "char", "void", "if", "else", "while", "for", "return"};
+    const char *keywords[] = {
+        "int", "char", "void", "if", "else", "while", "for", "return",
+        "struct", "typedef", "const", "unsigned", "signed", "break", "continue",
+        "default", "switch", "case", "enum", "extern", "float", "double",
+        "goto", "register", "short", "sizeof", "static", "union", "volatile"
+    };
     int num_keywords = sizeof(keywords) / sizeof(keywords[0]);
     
     for (int i = 0; i < num_keywords; i++) {
@@ -99,9 +183,27 @@ void close_tokenizer(FILE *file) {
 }
 
 void print_token(Token token) {
-    printf("Token: Type=%s, Value=%s\n", 
-           get_token_type_string(token.type), 
-           token.value);
+    // Print basic token info
+    printf("Token: Type=%s, Value=", get_token_type_string(token.type));
+    
+    // Check for single equals sign (which sometimes gets displayed incorrectly)
+    if (token.type == TOKEN_OPERATOR && 
+        token.value[0] == '=' && 
+        token.value[1] == '\0') {
+        printf("= (assignment)");
+    } else {
+        // Print the token value normally
+        printf("%s", token.value);
+    }
+    
+    // Also print hex values for debugging
+    printf(" [Hex: ");
+    for (int i = 0; token.value[i] != '\0'; i++) {
+        printf("%02X ", (unsigned char)token.value[i]);
+    }
+    printf("]");
+    
+    printf("\n");
 }
 
 const char* get_token_type_string(enum TokenType type) {

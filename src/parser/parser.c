@@ -31,6 +31,20 @@ static ASTNode* parse_factor(Parser *parser);
 static ASTNode* parse_unary(Parser *parser);
 static ASTNode* parse_primary(Parser *parser);
 
+// Helper function to compare tokens based on their raw bytes
+static int token_equals(const char *token_val, const char *expected) {
+    // Compare the token value against the expected string byte by byte
+    int i;
+    for (i = 0; token_val[i] != '\0' && expected[i] != '\0'; i++) {
+        if ((unsigned char)token_val[i] != (unsigned char)expected[i]) {
+            return 0;  // Mismatch found
+        }
+    }
+    
+    // Both strings should end at the same position
+    return token_val[i] == '\0' && expected[i] == '\0';
+}
+
 Parser* init_parser(const char *filename) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
@@ -104,34 +118,25 @@ ASTNode* parse_program(Parser *parser) {
 }
 
 static ASTNode* parse_declaration(Parser *parser) {
-    // Check for function or variable declaration
-    if (match(parser, TOKEN_KEYWORD)) {
-        // Save the type
-        char type[MAX_TOKEN_LEN];
-        strcpy(type, parser->previous_token.value);
+    if (check(parser, TOKEN_KEYWORD)) {
+        // Save current position
+        Token current_token = parser->current_token;
         
-        // Check for identifier
-        if (match(parser, TOKEN_IDENTIFIER)) {
-            // Save the identifier
-            char identifier[MAX_TOKEN_LEN];
-            strcpy(identifier, parser->previous_token.value);
-            
-            // Check if it's a function or variable
-            if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, "(") == 0) {
-                // Function declaration
-                // Restore token position to re-parse in parse_function_declaration
-                parser->current_token = parser->previous_token;
-                return parse_function_declaration(parser);
-            } else {
-                // Variable declaration
-                // Restore token position to re-parse in parse_variable_declaration
-                parser->current_token = parser->previous_token;
-                return parse_variable_declaration(parser);
-            }
-        } else {
-            set_error(parser, "Expected identifier after type.");
-            return NULL;
+        // Try to parse as a function declaration
+        ASTNode* function = parse_function_declaration(parser);
+        if (function) {
+            return function;
         }
+        
+        // If not a function, restore position and try as a variable declaration
+        parser->current_token = current_token;
+        ASTNode* variable = parse_variable_declaration(parser);
+        if (variable) {
+            return variable;
+        }
+        
+        // If neither worked, restore position and try as a statement
+        parser->current_token = current_token;
     }
     
     // Not a declaration, try parsing as a statement
@@ -464,7 +469,7 @@ void print_ast(ASTNode *node, int indent) {
 static ASTNode* parse_compound_statement(Parser *parser) {
     // Parse: { statement* }
     consume(parser, TOKEN_PUNCTUATOR, "Expected '{' at start of block.");
-    if (parser->has_error || strcmp(parser->previous_token.value, "{") != 0) {
+    if (parser->has_error || !token_equals(parser->previous_token.value, "{")) {
         set_error(parser, "Expected '{' at start of block.");
         return NULL;
     }
@@ -478,8 +483,19 @@ static ASTNode* parse_compound_statement(Parser *parser) {
     compound->statement_count = 0;
     
     // Parse statements until we reach the closing brace
-    while (!check(parser, TOKEN_PUNCTUATOR) || strcmp(parser->current_token.value, "}") != 0) {
-        ASTNode *statement = parse_statement(parser);
+    while (!check(parser, TOKEN_PUNCTUATOR) || !token_equals(parser->current_token.value, "}")) {
+        ASTNode *statement = NULL;
+        
+        // First check if it's a declaration or a statement
+        if (check(parser, TOKEN_KEYWORD) && 
+            (token_equals(parser->current_token.value, "int") || 
+             token_equals(parser->current_token.value, "char") || 
+             token_equals(parser->current_token.value, "void"))) {
+            statement = parse_declaration(parser);
+        } else {
+            statement = parse_statement(parser);
+        }
+        
         if (statement) {
             // Resize array if needed
             if (compound->statement_count >= capacity) {
@@ -502,7 +518,7 @@ static ASTNode* parse_compound_statement(Parser *parser) {
     
     // Match closing brace
     consume(parser, TOKEN_PUNCTUATOR, "Expected '}' at end of block.");
-    if (parser->has_error || strcmp(parser->previous_token.value, "}") != 0) {
+    if (parser->has_error || !token_equals(parser->previous_token.value, "}")) {
         set_error(parser, "Expected '}' at end of block.");
         free_ast_node((ASTNode*)compound);
         return NULL;
@@ -511,34 +527,281 @@ static ASTNode* parse_compound_statement(Parser *parser) {
     return (ASTNode*)compound;
 }
 
+static ASTNode* parse_expression(Parser *parser) {
+    return parse_assignment(parser);
+}
+
+static ASTNode* parse_assignment(Parser *parser) {
+    ASTNode* expr = parse_equality(parser);
+    
+    if (expr && check(parser, TOKEN_OPERATOR) && 
+        (token_equals(parser->current_token.value, "="))) {
+        
+        advance(parser);  // Consume '='
+        
+        ASTNode* value = parse_assignment(parser);
+        
+        if (value) {
+            if (expr->type != NODE_IDENTIFIER) {
+                set_error(parser, "Invalid assignment target");
+                free_ast_node(value);
+                return expr;
+            }
+            
+            AssignmentExprNode* assign = (AssignmentExprNode*)create_ast_node(
+                NODE_ASSIGNMENT_EXPR, sizeof(AssignmentExprNode));
+            
+            if (assign) {
+                assign->target = expr;
+                assign->value = value;
+                expr = (ASTNode*)assign;
+            } else {
+                free_ast_node(value);
+            }
+        }
+    }
+    
+    return expr;
+}
+
+static ASTNode* parse_equality(Parser *parser) {
+    ASTNode* expr = parse_comparison(parser);
+    
+    while (expr && check(parser, TOKEN_OPERATOR) && 
+           (token_equals(parser->current_token.value, "==") || 
+            token_equals(parser->current_token.value, "!="))) {
+        
+        char op[MAX_TOKEN_LEN];
+        strcpy(op, parser->current_token.value);
+        advance(parser);
+        
+        ASTNode* right = parse_comparison(parser);
+        if (right) {
+            BinaryExprNode* binary = (BinaryExprNode*)create_ast_node(
+                NODE_BINARY_EXPR, sizeof(BinaryExprNode));
+            
+            if (binary) {
+                strcpy(binary->operator, op);
+                binary->left = expr;
+                binary->right = right;
+                expr = (ASTNode*)binary;
+            } else {
+                free_ast_node(right);
+            }
+        }
+    }
+    
+    return expr;
+}
+
+static ASTNode* parse_comparison(Parser *parser) {
+    ASTNode* expr = parse_term(parser);
+    
+    while (expr && check(parser, TOKEN_OPERATOR) && 
+           (token_equals(parser->current_token.value, "<") || 
+            token_equals(parser->current_token.value, "<=") ||
+            token_equals(parser->current_token.value, ">") ||
+            token_equals(parser->current_token.value, ">="))) {
+        
+        char op[MAX_TOKEN_LEN];
+        strcpy(op, parser->current_token.value);
+        advance(parser);  // Consume the operator
+        
+        ASTNode* right = parse_term(parser);
+        if (right) {
+            BinaryExprNode* binary = (BinaryExprNode*)create_ast_node(
+                NODE_BINARY_EXPR, sizeof(BinaryExprNode));
+            
+            if (binary) {
+                strcpy(binary->operator, op);
+                binary->left = expr;
+                binary->right = right;
+                expr = (ASTNode*)binary;
+            } else {
+                free_ast_node(right);
+            }
+        }
+    }
+    
+    return expr;
+}
+
+static ASTNode* parse_term(Parser *parser) {
+    ASTNode* expr = parse_factor(parser);
+    
+    while (expr && check(parser, TOKEN_OPERATOR) && 
+           (strcmp(parser->current_token.value, "+") == 0 || 
+            strcmp(parser->current_token.value, "-") == 0)) {
+        
+        char op[MAX_TOKEN_LEN];
+        strcpy(op, parser->current_token.value);
+        advance(parser);
+        
+        ASTNode* right = parse_factor(parser);
+        if (right) {
+            BinaryExprNode* binary = (BinaryExprNode*)create_ast_node(
+                NODE_BINARY_EXPR, sizeof(BinaryExprNode));
+            
+            if (binary) {
+                strcpy(binary->operator, op);
+                binary->left = expr;
+                binary->right = right;
+                expr = (ASTNode*)binary;
+            }
+        }
+    }
+    
+    return expr;
+}
+
+static ASTNode* parse_factor(Parser *parser) {
+    ASTNode* expr = parse_unary(parser);
+    
+    while (expr && check(parser, TOKEN_OPERATOR) && 
+           (strcmp(parser->current_token.value, "*") == 0 || 
+            strcmp(parser->current_token.value, "/") == 0)) {
+        
+        char op[MAX_TOKEN_LEN];
+        strcpy(op, parser->current_token.value);
+        advance(parser);
+        
+        ASTNode* right = parse_unary(parser);
+        if (right) {
+            BinaryExprNode* binary = (BinaryExprNode*)create_ast_node(
+                NODE_BINARY_EXPR, sizeof(BinaryExprNode));
+            
+            if (binary) {
+                strcpy(binary->operator, op);
+                binary->left = expr;
+                binary->right = right;
+                expr = (ASTNode*)binary;
+            }
+        }
+    }
+    
+    return expr;
+}
+
+static ASTNode* parse_unary(Parser *parser) {
+    if (check(parser, TOKEN_OPERATOR) &&
+        (strcmp(parser->current_token.value, "!") == 0 || 
+         strcmp(parser->current_token.value, "-") == 0 ||
+         strcmp(parser->current_token.value, "&") == 0 ||
+         strcmp(parser->current_token.value, "*") == 0)) {
+        
+        char op[MAX_TOKEN_LEN];
+        strcpy(op, parser->current_token.value);
+        advance(parser);
+        
+        ASTNode* operand = parse_unary(parser);
+        if (operand) {
+            UnaryExprNode* unary = (UnaryExprNode*)create_ast_node(
+                NODE_UNARY_EXPR, sizeof(UnaryExprNode));
+            
+            if (unary) {
+                strcpy(unary->operator, op);
+                unary->operand = operand;
+                return (ASTNode*)unary;
+            }
+        }
+        
+        return NULL;
+    }
+    
+    return parse_primary(parser);
+}
+
 static ASTNode* parse_primary(Parser *parser) {
-    // Parse: number | string | identifier | ( expression )
     if (match(parser, TOKEN_NUMBER)) {
-        NumberLiteralNode *number = (NumberLiteralNode*)create_ast_node(NODE_NUMBER_LITERAL, sizeof(NumberLiteralNode));
-        if (!number) return NULL;
+        NumberLiteralNode* number = (NumberLiteralNode*)create_ast_node(
+            NODE_NUMBER_LITERAL, sizeof(NumberLiteralNode));
         
-        strcpy(number->value, parser->previous_token.value);
-        return (ASTNode*)number;
-    } else if (match(parser, TOKEN_STRING)) {
-        StringLiteralNode *string = (StringLiteralNode*)create_ast_node(NODE_STRING_LITERAL, sizeof(StringLiteralNode));
-        if (!string) return NULL;
+        if (number) {
+            strcpy(number->value, parser->previous_token.value);
+            return (ASTNode*)number;
+        }
+    }
+    
+    if (match(parser, TOKEN_IDENTIFIER)) {
+        char id_name[MAX_TOKEN_LEN];
+        strcpy(id_name, parser->previous_token.value);
         
-        strcpy(string->value, parser->previous_token.value);
-        return (ASTNode*)string;
-    } else if (match(parser, TOKEN_IDENTIFIER)) {
-        IdentifierNode *identifier = (IdentifierNode*)create_ast_node(NODE_IDENTIFIER, sizeof(IdentifierNode));
-        if (!identifier) return NULL;
+        if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, "(") == 0) {
+            advance(parser); // Consume '('
+            
+            CallExprNode* call = (CallExprNode*)create_ast_node(
+                NODE_CALL_EXPR, sizeof(CallExprNode));
+            
+            if (!call) return NULL;
+            
+            call->callee = strdup(id_name);
+            call->arguments = NULL;
+            call->argument_count = 0;
+            
+            if (!check(parser, TOKEN_PUNCTUATOR) || strcmp(parser->current_token.value, ")") != 0) {
+                int capacity = 4;
+                call->arguments = malloc(capacity * sizeof(ASTNode*));
+                
+                do {
+                    if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ")") == 0) {
+                        break;
+                    }
+                    
+                    ASTNode* arg = parse_expression(parser);
+                    if (!arg) {
+                        for (int i = 0; i < call->argument_count; i++) {
+                            free_ast_node(call->arguments[i]);
+                        }
+                        free(call->arguments);
+                        free(call->callee);
+                        free(call);
+                        return NULL;
+                    }
+                    
+                    if (call->argument_count >= capacity) {
+                        capacity *= 2;
+                        call->arguments = realloc(call->arguments, capacity * sizeof(ASTNode*));
+                    }
+                    
+                    call->arguments[call->argument_count++] = arg;
+                    
+                    if (!check(parser, TOKEN_PUNCTUATOR) || strcmp(parser->current_token.value, ",") != 0) {
+                        break;
+                    }
+                    
+                    advance(parser); // Consume ','
+                } while (1);
+            }
+            
+            consume(parser, TOKEN_PUNCTUATOR, "Expected ')' after function arguments");
+            if (parser->has_error || strcmp(parser->previous_token.value, ")") != 0) {
+                set_error(parser, "Expected ')' after function arguments");
+                for (int i = 0; i < call->argument_count; i++) {
+                    free_ast_node(call->arguments[i]);
+                }
+                free(call->arguments);
+                free(call->callee);
+                free(call);
+                return NULL;
+            }
+            
+            return (ASTNode*)call;
+        } else {
+            IdentifierNode* identifier = (IdentifierNode*)create_ast_node(
+                NODE_IDENTIFIER, sizeof(IdentifierNode));
+            
+            if (identifier) {
+                strcpy(identifier->name, id_name);
+                return (ASTNode*)identifier;
+            }
+        }
+    }
+    
+    if (match(parser, TOKEN_PUNCTUATOR) && strcmp(parser->previous_token.value, "(") == 0) {
+        ASTNode* expr = parse_expression(parser);
         
-        strcpy(identifier->name, parser->previous_token.value);
-        return (ASTNode*)identifier;
-    } else if (match(parser, TOKEN_PUNCTUATOR) && strcmp(parser->previous_token.value, "(") == 0) {
-        // Parse: ( expression )
-        ASTNode *expr = parse_expression(parser);
-        if (!expr) return NULL;
-        
-        consume(parser, TOKEN_PUNCTUATOR, "Expected ')' after expression.");
+        consume(parser, TOKEN_PUNCTUATOR, "Expected ')' after expression");
         if (parser->has_error || strcmp(parser->previous_token.value, ")") != 0) {
-            set_error(parser, "Expected ')' after expression.");
             free_ast_node(expr);
             return NULL;
         }
@@ -546,104 +809,197 @@ static ASTNode* parse_primary(Parser *parser) {
         return expr;
     }
     
-    set_error(parser, "Expected expression.");
+    set_error(parser, "Expected expression");
     return NULL;
 }
 
 // Stub implementations for the remaining functions - will be expanded later
 static ASTNode* parse_function_declaration(Parser *parser) {
-    // Return a dummy function declaration with minimal valid structure
-    FunctionDeclNode *func = (FunctionDeclNode*)create_ast_node(NODE_FUNCTION_DECL, sizeof(FunctionDeclNode));
-    if (!func) return NULL;
+    // Parse return type
+    if (!match(parser, TOKEN_KEYWORD)) {
+        return NULL;  // Not a function declaration
+    }
     
-    // Parse: type identifier(params) { body }
-    // Type was already matched in parse_declaration
     char return_type[MAX_TOKEN_LEN];
     strcpy(return_type, parser->previous_token.value);
     
-    // Match identifier
+    // Parse function name
     if (!match(parser, TOKEN_IDENTIFIER)) {
-        set_error(parser, "Expected function name.");
-        free(func);
-        return NULL;
+        return NULL;  // Not a function declaration
     }
     
     char name[MAX_TOKEN_LEN];
     strcpy(name, parser->previous_token.value);
     
-    // Set minimal valid fields
+    // Match opening parenthesis
+    if (!match(parser, TOKEN_PUNCTUATOR) || !token_equals(parser->previous_token.value, "(")) {
+        return NULL;  // Not a function declaration
+    }
+    
+    // Create function node
+    FunctionDeclNode *func = (FunctionDeclNode*)create_ast_node(NODE_FUNCTION_DECL, sizeof(FunctionDeclNode));
+    if (!func) return NULL;
+    
     func->name = strdup(name);
     func->return_type = strdup(return_type);
     func->parameters = NULL;
     func->parameter_count = 0;
     
-    // Skip to opening brace
-    while (!check(parser, TOKEN_EOF) && 
-          !(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, "{") == 0)) {
-        advance(parser);
-    }
-    
-    // Parse body
-    if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, "{") == 0) {
-        func->body = parse_compound_statement(parser);
-    } else {
-        // Create an empty body
-        CompoundStmtNode *body = (CompoundStmtNode*)create_ast_node(NODE_COMPOUND_STMT, sizeof(CompoundStmtNode));
-        if (body) {
-            body->statements = NULL;
-            body->statement_count = 0;
+    // Parse parameters if any
+    if (!check(parser, TOKEN_PUNCTUATOR) || !token_equals(parser->current_token.value, ")")) {
+        // Allocate initial space for parameters
+        int capacity = 4;
+        func->parameters = malloc(capacity * sizeof(struct {char *type; char *name;}));
+        if (!func->parameters) {
+            goto cleanup;
         }
-        func->body = (ASTNode*)body;
+        
+        do {
+            // Reached the end of parameters
+            if (check(parser, TOKEN_PUNCTUATOR) && token_equals(parser->current_token.value, ")")) {
+                break;
+            }
+            
+            // Parse parameter type
+            if (!match(parser, TOKEN_KEYWORD)) {
+                set_error(parser, "Expected parameter type");
+                goto cleanup;
+            }
+            
+            char param_type[MAX_TOKEN_LEN];
+            strcpy(param_type, parser->previous_token.value);
+            
+            // Parse parameter name
+            if (!match(parser, TOKEN_IDENTIFIER)) {
+                set_error(parser, "Expected parameter name");
+                goto cleanup;
+            }
+            
+            char param_name[MAX_TOKEN_LEN];
+            strcpy(param_name, parser->previous_token.value);
+            
+            // Resize parameter array if needed
+            if (func->parameter_count >= capacity) {
+                capacity *= 2;
+                func->parameters = realloc(func->parameters, capacity * sizeof(struct {char *type; char *name;}));
+                if (!func->parameters) {
+                    set_error(parser, "Memory allocation failed");
+                    goto cleanup;
+                }
+            }
+            
+            // Add parameter to function declaration
+            func->parameters[func->parameter_count].type = strdup(param_type);
+            func->parameters[func->parameter_count].name = strdup(param_name);
+            func->parameter_count++;
+            
+            // Check for comma or end of parameters
+            if (check(parser, TOKEN_PUNCTUATOR) && token_equals(parser->current_token.value, ",")) {
+                advance(parser); // Consume comma
+            } else if (check(parser, TOKEN_PUNCTUATOR) && token_equals(parser->current_token.value, ")")) {
+                break;
+            } else {
+                set_error(parser, "Expected ',' or ')' after parameter");
+                goto cleanup;
+            }
+        } while (1);
     }
     
-    return (ASTNode*)func;
+    // Match closing parenthesis
+    if (!match(parser, TOKEN_PUNCTUATOR) || !token_equals(parser->previous_token.value, ")")) {
+        set_error(parser, "Expected ')' after parameters");
+        goto cleanup;
+    }
+    
+    // Check if it's a function declaration (ends with semicolon)
+    if (check(parser, TOKEN_PUNCTUATOR) && token_equals(parser->current_token.value, ";")) {
+        advance(parser); // Consume semicolon
+        func->body = NULL;
+        return (ASTNode*)func;
+    }
+    
+    // Parse function body
+    if (check(parser, TOKEN_PUNCTUATOR) && token_equals(parser->current_token.value, "{")) {
+        func->body = parse_compound_statement(parser);
+        if (!func->body) {
+            goto cleanup;
+        }
+        return (ASTNode*)func;
+    } else {
+        set_error(parser, "Expected '{' for function body or ';' for declaration");
+        goto cleanup;
+    }
+    
+cleanup:
+    free(func->name);
+    free(func->return_type);
+    for (int i = 0; i < func->parameter_count; i++) {
+        free(func->parameters[i].type);
+        free(func->parameters[i].name);
+    }
+    free(func->parameters);
+    free(func);
+    return NULL;
 }
 
 static ASTNode* parse_variable_declaration(Parser *parser) {
-    // Return a variable declaration with minimal valid structure
-    VariableDeclNode *var = (VariableDeclNode*)create_ast_node(NODE_VARIABLE_DECL, sizeof(VariableDeclNode));
-    if (!var) return NULL;
+    // Match the variable type
+    if (!match(parser, TOKEN_KEYWORD)) {
+        set_error(parser, "Expected variable type");
+        return NULL;
+    }
     
-    // Parse: type identifier [= expression] ;
-    // Type was already matched in parse_declaration
     char type[MAX_TOKEN_LEN];
     strcpy(type, parser->previous_token.value);
     
-    // Match identifier
+    // Match the variable name
     if (!match(parser, TOKEN_IDENTIFIER)) {
-        set_error(parser, "Expected variable name.");
-        free(var);
+        set_error(parser, "Expected variable name");
         return NULL;
     }
     
     char name[MAX_TOKEN_LEN];
     strcpy(name, parser->previous_token.value);
     
-    // Set minimal valid fields
+    // Create variable node
+    VariableDeclNode *var = (VariableDeclNode*)create_ast_node(NODE_VARIABLE_DECL, sizeof(VariableDeclNode));
+    if (!var) return NULL;
+    
     var->type = strdup(type);
     var->name = strdup(name);
     var->initializer = NULL;
     
-    // Skip to semicolon
-    while (!check(parser, TOKEN_EOF) && 
-          !(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0)) {
-        advance(parser);
+    // Check for initialization
+    if (check(parser, TOKEN_OPERATOR) && strcmp(parser->current_token.value, "=") == 0) {
+        advance(parser); // Consume '='
+        
+        // Parse initializer expression
+        var->initializer = parse_expression(parser);
+        if (!var->initializer) {
+            free(var->type);
+            free(var->name);
+            free(var);
+            return NULL;
+        }
     }
     
-    // Skip the semicolon if found
-    if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0) {
-        advance(parser);
+    // Match semicolon
+    if (!match(parser, TOKEN_PUNCTUATOR) || strcmp(parser->previous_token.value, ";") != 0) {
+        set_error(parser, "Expected ';' after variable declaration");
+        free(var->type);
+        free(var->name);
+        free_ast_node(var->initializer);
+        free(var);
+        return NULL;
     }
     
     return (ASTNode*)var;
 }
 
 static ASTNode* parse_statement(Parser *parser) {
-    // Try to parse a compound statement if we see a '{'
     if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, "{") == 0) {
         return parse_compound_statement(parser);
     } else if (check(parser, TOKEN_KEYWORD)) {
-        // Check for specific keywords
         if (strcmp(parser->current_token.value, "if") == 0) {
             return parse_if_statement(parser);
         } else if (strcmp(parser->current_token.value, "while") == 0) {
@@ -652,122 +1008,260 @@ static ASTNode* parse_statement(Parser *parser) {
             return parse_for_statement(parser);
         } else if (strcmp(parser->current_token.value, "return") == 0) {
             return parse_return_statement(parser);
-        } else {
-            // Probably a variable declaration - this should be handled by parse_declaration
-            // but we'll just skip it for now
-            advance(parser); // Skip the keyword
-            
-            // Skip to semicolon
-            while (!check(parser, TOKEN_EOF) && 
-                  !(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0)) {
-                advance(parser);
-            }
-            
-            if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0) {
-                advance(parser); // Skip the semicolon
-            }
-            
-            // Return an empty compound statement for now
-            CompoundStmtNode *empty = (CompoundStmtNode*)create_ast_node(NODE_COMPOUND_STMT, sizeof(CompoundStmtNode));
-            if (empty) {
-                empty->statements = NULL;
-                empty->statement_count = 0;
-            }
-            return (ASTNode*)empty;
+        } else if (strcmp(parser->current_token.value, "int") == 0 ||
+                   strcmp(parser->current_token.value, "char") == 0 ||
+                   strcmp(parser->current_token.value, "void") == 0) {
+            return parse_declaration(parser);
         }
-    } else if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0) {
-        // Empty statement
-        advance(parser); // Skip the semicolon
-        
-        // Return an empty compound statement
-        CompoundStmtNode *empty = (CompoundStmtNode*)create_ast_node(NODE_COMPOUND_STMT, sizeof(CompoundStmtNode));
-        if (empty) {
-            empty->statements = NULL;
-            empty->statement_count = 0;
-        }
-        return (ASTNode*)empty;
-    } else {
-        // Assume it's an expression statement
-        ExprStmtNode *expr_stmt = (ExprStmtNode*)create_ast_node(NODE_EXPRESSION_STMT, sizeof(ExprStmtNode));
-        if (!expr_stmt) return NULL;
-        
-        // Parse the expression (or just skip to semicolon for now)
-        expr_stmt->expression = NULL;
-        
-        // Skip to semicolon
-        while (!check(parser, TOKEN_EOF) && 
-              !(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0)) {
-            advance(parser);
-        }
-        
-        if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0) {
-            advance(parser); // Skip the semicolon
-        }
-        
-        return (ASTNode*)expr_stmt;
     }
+    
+    return parse_expression_statement(parser);
 }
 
 static ASTNode* parse_expression_statement(Parser *parser) {
-    // Return a dummy expression statement for now
-    return create_ast_node(NODE_EXPRESSION_STMT, sizeof(ExprStmtNode));
+    // Create expression statement node
+    ExprStmtNode *stmt = (ExprStmtNode*)create_ast_node(NODE_EXPRESSION_STMT, sizeof(ExprStmtNode));
+    if (!stmt) return NULL;
+    
+    // Check for empty statement (just a semicolon)
+    if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0) {
+        advance(parser); // Consume ';'
+        stmt->expression = NULL;
+        return (ASTNode*)stmt;
+    }
+    
+    // Parse expression
+    stmt->expression = parse_expression(parser);
+    if (!stmt->expression) {
+        free(stmt);
+        return NULL;
+    }
+    
+    // Match semicolon
+    if (!match(parser, TOKEN_PUNCTUATOR) || strcmp(parser->previous_token.value, ";") != 0) {
+        set_error(parser, "Expected ';' after expression");
+        free_ast_node(stmt->expression);
+        free(stmt);
+        return NULL;
+    }
+    
+    return (ASTNode*)stmt;
 }
 
 static ASTNode* parse_if_statement(Parser *parser) {
-    // Return a dummy if statement for now
-    return create_ast_node(NODE_IF_STMT, sizeof(IfStmtNode));
+    // Match 'if' keyword
+    if (!match(parser, TOKEN_KEYWORD) || strcmp(parser->previous_token.value, "if") != 0) {
+        set_error(parser, "Expected 'if' keyword");
+        return NULL;
+    }
+    
+    // Match opening parenthesis
+    if (!match(parser, TOKEN_PUNCTUATOR) || strcmp(parser->previous_token.value, "(") != 0) {
+        set_error(parser, "Expected '(' after 'if'");
+        return NULL;
+    }
+    
+    // Create if statement node
+    IfStmtNode *if_stmt = (IfStmtNode*)create_ast_node(NODE_IF_STMT, sizeof(IfStmtNode));
+    if (!if_stmt) return NULL;
+    
+    // Parse condition
+    if_stmt->condition = parse_expression(parser);
+    if (!if_stmt->condition) {
+        free(if_stmt);
+        return NULL;
+    }
+    
+    // Match closing parenthesis
+    if (!match(parser, TOKEN_PUNCTUATOR) || strcmp(parser->previous_token.value, ")") != 0) {
+        set_error(parser, "Expected ')' after if condition");
+        free_ast_node(if_stmt->condition);
+        free(if_stmt);
+        return NULL;
+    }
+    
+    // Parse 'then' branch
+    if_stmt->then_branch = parse_statement(parser);
+    if (!if_stmt->then_branch) {
+        free_ast_node(if_stmt->condition);
+        free(if_stmt);
+        return NULL;
+    }
+    
+    // Initialize else branch to NULL
+    if_stmt->else_branch = NULL;
+    
+    // Check for 'else' branch
+    if (match(parser, TOKEN_KEYWORD) && strcmp(parser->previous_token.value, "else") == 0) {
+        if_stmt->else_branch = parse_statement(parser);
+        if (!if_stmt->else_branch) {
+            free_ast_node(if_stmt->condition);
+            free_ast_node(if_stmt->then_branch);
+            free(if_stmt);
+            return NULL;
+        }
+    }
+    
+    return (ASTNode*)if_stmt;
 }
 
 static ASTNode* parse_while_statement(Parser *parser) {
-    // Return a dummy while statement for now
-    return create_ast_node(NODE_WHILE_STMT, sizeof(WhileStmtNode));
+    advance(parser); // Consume 'while'
+    
+    consume(parser, TOKEN_PUNCTUATOR, "Expected '(' after 'while'");
+    if (parser->has_error || strcmp(parser->previous_token.value, "(") != 0) {
+        return NULL;
+    }
+    
+    WhileStmtNode* while_stmt = (WhileStmtNode*)create_ast_node(NODE_WHILE_STMT, sizeof(WhileStmtNode));
+    if (!while_stmt) return NULL;
+    
+    while_stmt->condition = parse_expression(parser);
+    if (!while_stmt->condition) {
+        free(while_stmt);
+        return NULL;
+    }
+    
+    consume(parser, TOKEN_PUNCTUATOR, "Expected ')' after while condition");
+    if (parser->has_error || strcmp(parser->previous_token.value, ")") != 0) {
+        free_ast_node(while_stmt->condition);
+        free(while_stmt);
+        return NULL;
+    }
+    
+    while_stmt->body = parse_statement(parser);
+    if (!while_stmt->body) {
+        free_ast_node(while_stmt->condition);
+        free(while_stmt);
+        return NULL;
+    }
+    
+    return (ASTNode*)while_stmt;
 }
 
 static ASTNode* parse_for_statement(Parser *parser) {
-    // Return a dummy for statement for now
-    return create_ast_node(NODE_FOR_STMT, sizeof(ForStmtNode));
+    advance(parser); // Consume 'for'
+    
+    consume(parser, TOKEN_PUNCTUATOR, "Expected '(' after 'for'");
+    if (parser->has_error || strcmp(parser->previous_token.value, "(") != 0) {
+        return NULL;
+    }
+    
+    ForStmtNode* for_stmt = (ForStmtNode*)create_ast_node(NODE_FOR_STMT, sizeof(ForStmtNode));
+    if (!for_stmt) return NULL;
+    
+    // Initialize all fields to NULL
+    for_stmt->initializer = NULL;
+    for_stmt->condition = NULL;
+    for_stmt->increment = NULL;
+    for_stmt->body = NULL;
+    
+    // Parse initializer
+    if (!(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0)) {
+        if (check(parser, TOKEN_KEYWORD) && 
+            (strcmp(parser->current_token.value, "int") == 0 ||
+             strcmp(parser->current_token.value, "char") == 0)) {
+            for_stmt->initializer = parse_variable_declaration(parser);
+        } else {
+            ExprStmtNode* init_expr = (ExprStmtNode*)create_ast_node(NODE_EXPRESSION_STMT, sizeof(ExprStmtNode));
+            if (init_expr) {
+                init_expr->expression = parse_expression(parser);
+                for_stmt->initializer = (ASTNode*)init_expr;
+                
+                consume(parser, TOKEN_PUNCTUATOR, "Expected ';' after for initializer");
+                if (parser->has_error || strcmp(parser->previous_token.value, ";") != 0) {
+                    free_ast_node(for_stmt->initializer);
+                    free(for_stmt);
+                    return NULL;
+                }
+            }
+        }
+        
+        if (!for_stmt->initializer) {
+            free(for_stmt);
+            return NULL;
+        }
+    } else {
+        advance(parser); // Consume ';'
+    }
+    
+    // Parse condition
+    if (!(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0)) {
+        for_stmt->condition = parse_expression(parser);
+        if (!for_stmt->condition) {
+            free_ast_node(for_stmt->initializer);
+            free(for_stmt);
+            return NULL;
+        }
+    }
+    
+    consume(parser, TOKEN_PUNCTUATOR, "Expected ';' after for condition");
+    if (parser->has_error || strcmp(parser->previous_token.value, ";") != 0) {
+        free_ast_node(for_stmt->initializer);
+        free_ast_node(for_stmt->condition);
+        free(for_stmt);
+        return NULL;
+    }
+    
+    // Parse increment
+    if (!(check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ")") == 0)) {
+        ExprStmtNode* incr_expr = (ExprStmtNode*)create_ast_node(NODE_EXPRESSION_STMT, sizeof(ExprStmtNode));
+        if (incr_expr) {
+            incr_expr->expression = parse_expression(parser);
+            for_stmt->increment = (ASTNode*)incr_expr;
+            
+            if (!for_stmt->increment) {
+                free_ast_node(for_stmt->initializer);
+                free_ast_node(for_stmt->condition);
+                free(for_stmt);
+                return NULL;
+            }
+        }
+    }
+    
+    consume(parser, TOKEN_PUNCTUATOR, "Expected ')' after for clauses");
+    if (parser->has_error || strcmp(parser->previous_token.value, ")") != 0) {
+        free_ast_node(for_stmt->initializer);
+        free_ast_node(for_stmt->condition);
+        free_ast_node(for_stmt->increment);
+        free(for_stmt);
+        return NULL;
+    }
+    
+    for_stmt->body = parse_statement(parser);
+    if (!for_stmt->body) {
+        free_ast_node(for_stmt->initializer);
+        free_ast_node(for_stmt->condition);
+        free_ast_node(for_stmt->increment);
+        free(for_stmt);
+        return NULL;
+    }
+    
+    return (ASTNode*)for_stmt;
 }
 
 static ASTNode* parse_return_statement(Parser *parser) {
-    // Return a dummy return statement for now
-    return create_ast_node(NODE_RETURN_STMT, sizeof(ReturnStmtNode));
-}
-
-static ASTNode* parse_expression(Parser *parser) {
-    // For now, create a simple number literal
-    NumberLiteralNode *number = (NumberLiteralNode*)create_ast_node(NODE_NUMBER_LITERAL, sizeof(NumberLiteralNode));
-    if (number) {
-        strcpy(number->value, "0"); // Default to 0
+    advance(parser); // Consume 'return'
+    
+    ReturnStmtNode* return_stmt = (ReturnStmtNode*)create_ast_node(NODE_RETURN_STMT, sizeof(ReturnStmtNode));
+    if (!return_stmt) return NULL;
+    
+    if (check(parser, TOKEN_PUNCTUATOR) && strcmp(parser->current_token.value, ";") == 0) {
+        return_stmt->value = NULL;
+    } else {
+        return_stmt->value = parse_expression(parser);
+        if (!return_stmt->value) {
+            free(return_stmt);
+            return NULL;
+        }
     }
-    return (ASTNode*)number;
+    
+    consume(parser, TOKEN_PUNCTUATOR, "Expected ';' after return value");
+    if (parser->has_error || strcmp(parser->previous_token.value, ";") != 0) {
+        free_ast_node(return_stmt->value);
+        free(return_stmt);
+        return NULL;
+    }
+    
+    return (ASTNode*)return_stmt;
 }
-
-static ASTNode* parse_assignment(Parser *parser) {
-    // Return a dummy assignment expression for now
-    return create_ast_node(NODE_ASSIGNMENT_EXPR, sizeof(AssignmentExprNode));
-}
-
-static ASTNode* parse_equality(Parser *parser) {
-    // Return a dummy binary expression for now
-    return create_ast_node(NODE_BINARY_EXPR, sizeof(BinaryExprNode));
-}
-
-static ASTNode* parse_comparison(Parser *parser) {
-    // Return a dummy binary expression for now
-    return create_ast_node(NODE_BINARY_EXPR, sizeof(BinaryExprNode));
-}
-
-static ASTNode* parse_term(Parser *parser) {
-    // Return a dummy binary expression for now
-    return create_ast_node(NODE_BINARY_EXPR, sizeof(BinaryExprNode));
-}
-
-static ASTNode* parse_factor(Parser *parser) {
-    // Return a dummy binary expression for now
-    return create_ast_node(NODE_BINARY_EXPR, sizeof(BinaryExprNode));
-}
-
-static ASTNode* parse_unary(Parser *parser) {
-    // Return a dummy unary expression for now
-    return create_ast_node(NODE_UNARY_EXPR, sizeof(UnaryExprNode));
-} 

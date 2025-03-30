@@ -13,7 +13,7 @@ SRC = src/main.c \
 OBJ = $(SRC:.c=.o)
 TARGET = ccompiler
 
-.PHONY: all clean test
+.PHONY: all clean test test-advanced
 
 all: $(TARGET)
 
@@ -29,9 +29,15 @@ clean:
 test: $(TARGET)
 	./$(TARGET) examples/test.c
 
+test-advanced: $(TARGET)
+	./$(TARGET) examples/advanced.c
+
+test-factorial: $(TARGET)
+	./$(TARGET) examples/factorial.c
+
 # Dependencies
 src/main.o: src/main.c include/tokenizer/tokenizer.h include/parser/parser.h include/semantic/semantic.h include/codegen/codegen.h
 src/tokenizer/tokenizer.o: src/tokenizer/tokenizer.c include/tokenizer/tokenizer.h
 src/parser/parser.o: src/parser/parser.c include/parser/parser.h include/tokenizer/tokenizer.h
 src/semantic/semantic.o: src/semantic/semantic.c include/semantic/semantic.h include/parser/parser.h
-src/codegen/codegen.o: src/codegen/codegen.c include/codegen/codegen.h include/parser/parser.h 
+src/codegen/codegen.o: src/codegen/codegen.c include/codegen/codegen.h include/parser/parser.h include/semantic/semantic.h 

@@ -3,45 +3,61 @@
 
 #include "../parser/parser.h"
 
-/**
- * Symbol type enumeration
- */
+#define MAX_STRUCT_FIELDS 64
+#define MAX_TYPE_NAME 64
+
+typedef enum {
+    TYPE_VOID,
+    TYPE_INT,
+    TYPE_CHAR,
+    TYPE_POINTER,
+    TYPE_ARRAY,
+    TYPE_STRUCT
+} DataType;
+
+typedef struct TypeInfo {
+    DataType type;
+    char name[MAX_TYPE_NAME];
+    struct TypeInfo* base_type;   // For pointers and arrays
+    int array_size;               // For arrays
+    struct StructField {
+        char name[MAX_TOKEN_LEN]; // IDK IF THIS IS NEEDED
+        struct TypeInfo* type;
+    } fields[MAX_STRUCT_FIELDS];  // For structs
+    int field_count;              // For structs
+} TypeInfo;
+
 typedef enum {
     SYMBOL_VARIABLE,
     SYMBOL_FUNCTION,
-    SYMBOL_PARAMETER
+    SYMBOL_PARAMETER,
+    SYMBOL_STRUCT_TYPE
 } SymbolType;
 
-/**
- * Symbol table entry structure
- */
 typedef struct SymbolEntry {
-    char *name;              // Symbol name
-    char *type;              // Symbol type (int, char, etc.)
-    SymbolType symbol_type;  // What kind of symbol this is
-    int is_initialized;      // Whether the variable is initialized
-    int parameter_count;     // For functions, the number of parameters
-    struct SymbolEntry *next;  // For chaining in the symbol table
+    char* name;
+    TypeInfo* type_info;
+    SymbolType symbol_type;
+    int is_initialized;
+    int parameter_count;      // For functions
+    TypeInfo** param_types;   // For functions
+    struct SymbolEntry* next;
 } SymbolEntry;
 
-/**
- * Symbol table scope structure
- */
 typedef struct Scope {
-    SymbolEntry *symbols;     // Linked list of symbols in this scope
-    struct Scope *parent;     // Parent scope (for nested scopes)
-    struct Scope **children;  // Child scopes
-    int child_count;          // Number of child scopes
+    SymbolEntry* symbols;    
+    struct Scope* parent;     
+    struct Scope** children;  
+    int child_count;          
 } Scope;
 
-/**
- * Semantic analyzer structure
- */
 typedef struct {
-    Scope *global_scope;      // Global scope
-    Scope *current_scope;     // Current scope being analyzed
-    int has_error;            // Error flag
-    char error_message[256];  // Error message
+    Scope* global_scope;     
+    Scope* current_scope;    
+    int has_error;           
+    char error_message[256]; 
+    TypeInfo* struct_types;  // Registry of struct types
+    int struct_type_count;
 } SemanticAnalyzer;
 
 /**
@@ -56,7 +72,7 @@ SemanticAnalyzer* init_semantic_analyzer(void);
  * 
  * @param analyzer The analyzer to free
  */
-void free_semantic_analyzer(SemanticAnalyzer *analyzer);
+void free_semantic_analyzer(SemanticAnalyzer* analyzer);
 
 /**
  * Perform semantic analysis on an AST
@@ -65,21 +81,28 @@ void free_semantic_analyzer(SemanticAnalyzer *analyzer);
  * @param ast The AST to analyze
  * @return 1 on success, 0 on error
  */
-int analyze_ast(SemanticAnalyzer *analyzer, ASTNode *ast);
+int analyze_ast(SemanticAnalyzer* analyzer, ASTNode* ast);
 
 /**
  * Enter a new scope
  * 
  * @param analyzer The semantic analyzer
  */
-void enter_scope(SemanticAnalyzer *analyzer);
+void enter_scope(SemanticAnalyzer* analyzer);
 
 /**
  * Exit the current scope
  * 
  * @param analyzer The semantic analyzer
  */
-void exit_scope(SemanticAnalyzer *analyzer);
+void exit_scope(SemanticAnalyzer* analyzer);
+
+TypeInfo* create_basic_type(DataType type);
+TypeInfo* create_pointer_type(TypeInfo* base);
+TypeInfo* create_array_type(TypeInfo* base, int size);
+TypeInfo* create_struct_type(const char* name);
+TypeInfo* find_struct_type(SemanticAnalyzer* analyzer, const char* name);
+int add_struct_field(TypeInfo* struct_type, const char* name, TypeInfo* type);
 
 /**
  * Declare a symbol in the current scope
@@ -91,8 +114,21 @@ void exit_scope(SemanticAnalyzer *analyzer);
  * @param is_initialized Whether it's initialized
  * @return 1 on success, 0 on error (e.g., redeclaration)
  */
-int declare_symbol(SemanticAnalyzer *analyzer, const char *name, const char *type, 
+int declare_symbol(SemanticAnalyzer* analyzer, const char* name, TypeInfo* type, 
                    SymbolType symbol_type, int is_initialized);
+
+/**
+ * Declare a function in the current scope
+ * 
+ * @param analyzer The semantic analyzer
+ * @param name Function name
+ * @param return_type Function return type
+ * @param param_types Function parameter types
+ * @param param_count Number of parameters
+ * @return 1 on success, 0 on error
+ */
+int declare_function(SemanticAnalyzer* analyzer, const char* name, TypeInfo* return_type,
+                     TypeInfo** param_types, int param_count);
 
 /**
  * Look up a symbol in the current and parent scopes
@@ -101,13 +137,16 @@ int declare_symbol(SemanticAnalyzer *analyzer, const char *name, const char *typ
  * @param name Symbol name to look up
  * @return Symbol entry or NULL if not found
  */
-SymbolEntry* lookup_symbol(SemanticAnalyzer *analyzer, const char *name);
+SymbolEntry* lookup_symbol(SemanticAnalyzer* analyzer, const char* name);
 
 /**
  * Print the symbol table for debugging
  * 
  * @param analyzer The semantic analyzer
  */
-void print_symbol_table(SemanticAnalyzer *analyzer);
+void print_symbol_table(SemanticAnalyzer* analyzer);
+
+int types_compatible(TypeInfo* left, TypeInfo* right);
+TypeInfo* result_type(TypeInfo* left, TypeInfo* right, const char* op);
 
 #endif /* SEMANTIC_H */ 

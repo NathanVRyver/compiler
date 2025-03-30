@@ -1,17 +1,16 @@
-/* Simple C test file */
-
-int add(int a, int b) {
-    return a + b;
-}
-
+/* Test file */
 int main() {
-    int x = 5;
-    int y = 10;
-    int result = add(x, y);
+    int a;
+    int b;
+    int result;
+    
+    a = 5;
+    b = 10;
+    result = a + b;
     
     if (result > 10) {
-        return 1;
-    } else {
-        return 0;
+        result = result * 2;
     }
+    
+    return result;
 } 
